@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inventarios",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2025-06-01",
+  // Resumen de alertas por correo: los lunes a las 07:00 UTC (incluye las
+  // formaciones, carnets y revisiones que caducan en los próximos 30 días).
+  // También se puede enviar a mano desde el panel de control.
+  "triggers": {
+    "crons": ["0 7 * * 1"]
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "inventarios",
+      "database_id": "a647a69b-3e66-4fa6-b40a-8250b640c7e2"
+    }
+  ]
+}

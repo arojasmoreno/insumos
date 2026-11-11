@@ -1,0 +1,134 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import type { Env } from "./d1";
+import type { Variables } from "./types";
+import { bootstrap } from "./db";
+import { authRoutes } from "./auth";
+import { ValidationError } from "./crud";
+import { quimicos, material, maquinaria, centros, usuarios, epis, ropa, movimientos, zonas, subzonas, soportes, consumiblesTipos, tipos, tiposEquipo, situaciones, productosDisponibles, proveedores, formaciones } from "./resources";
+import { maquinariaHistorial } from "./maquinaria-historial";
+import { tallas } from "./tallas";
+import { estaciones } from "./estaciones";
+import { entregasRoutes } from "./entregas";
+import { movimientosRoutes } from "./movimientos";
+import { inventarioRoutes } from "./inventario";
+import { empresaRoutes } from "./empresa";
+import { reportesRoutes } from "./reportes";
+import { panelRoutes } from "./panel";
+import { buscadorRoutes } from "./buscador";
+import { documentos, documentosTipos } from "./documentos";
+import { alertasRoutes, enviarResumenDiario } from "./alertas";
+import { limpiezaRoutes } from "./limpieza";
+import { pedidosRoutes } from "./pedidos";
+import { formacionesRoutes } from "./formaciones";
+import { operariosRoutes } from "./operarios";
+
+// Origenes externos de confianza: el frontend servido por Freebuff y el
+// servidor de desarrollo de Vite. Las peticiones same-origin siempre pasan.
+const TRUSTED_ORIGINS = new Set([
+  "https://inventarios.freebuff.app",
+  "https://arojasmoreno.github.io",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]);
+
+// Cualquier subdominio de Freebuff vale como origen: el despliegue puede
+// cambiar de nombre (insuma, inventarios…) sin volver a tocar el Worker.
+function isFreebuffOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "freebuff.app" || hostname.endsWith(".freebuff.app");
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedOrigin(origin: string | undefined, requestUrl: string): boolean {
+  if (!origin) return true;
+  try {
+    if (origin === new URL(requestUrl).origin) return true;
+  } catch {
+    return false;
+  }
+  return TRUSTED_ORIGINS.has(origin) || isFreebuffOrigin(origin);
+}
+
+const app = new Hono<{ Bindings: Env; Variables: Variables }>();
+// CORS para que el frontend de Freebuff (otro origen) pueda llamar a la API
+// con cookies incluidas; responde también a los preflight OPTIONS.
+app.use("*", cors({
+  origin: (origin, c) => (isTrustedOrigin(origin, c.req.url) ? origin : ""),
+  credentials: true,
+  allowHeaders: ["Content-Type"],
+  maxAge: 86400,
+}));
+app.use("*", async (c, next) => {
+  await bootstrap(c.env.DB);
+  const method = c.req.method;
+  if (method !== "GET" && method !== "HEAD" && !isTrustedOrigin(c.req.header("Origin"), c.req.url)) {
+    return c.json({ error: "Origen no permitido" }, 403);
+  }
+  await next();
+});
+app.route("/api/auth", authRoutes);
+app.route("/api/quimicos", quimicos);
+app.route("/api/material-limpieza", material);
+// Plan de higiene (sección Limpieza): calendario mensual por centro y turno.
+app.route("/api/limpieza", limpiezaRoutes);
+app.route("/api/maquinaria", maquinaria as any);
+app.route("/api/maquinaria-historial", maquinariaHistorial);
+app.route("/api/situaciones", situaciones);
+app.route("/api/centros", centros as any);
+app.route("/api/usuarios", usuarios as any);
+app.route("/api/epis", epis as any);
+app.route("/api/ropa-trabajo", ropa as any);
+// Primero las rutas específicas (historial del artículo, ajustes de stock) para
+// que GET /:id del CRUD no capture «/historial».
+app.route("/api/movimientos", movimientosRoutes as any);
+app.route("/api/movimientos", movimientos as any);
+// Control de lotes de químicos: entradas, salidas FEFO y recuentos de inventario.
+app.route("/api/inventario", inventarioRoutes);
+app.route("/api/zonas", zonas);
+app.route("/api/subzonas", subzonas);
+app.route("/api/tipos-maquinaria", tipos);
+app.route("/api/tipos-equipo", tiposEquipo);
+app.route("/api/tallas", tallas);
+app.route("/api/estaciones", estaciones);
+app.route("/api/soportes", soportes);
+app.route("/api/consumibles-tipos", consumiblesTipos);
+// Productos disponibles (catálogo de pedidos), proveedores y pedidos de consumibles.
+app.route("/api/productos-disponibles", productosDisponibles);
+app.route("/api/proveedores", proveedores);
+app.route("/api/pedidos", pedidosRoutes);
+// Catálogo de formaciones/carnets/revisiones y su matriz por centro.
+app.route("/api/catalogo-formaciones", formaciones);
+app.route("/api/formaciones", formacionesRoutes);
+app.route("/api/operarios", operariosRoutes);
+app.route("/api/ropa-entregas", entregasRoutes);
+app.route("/api/empresa", empresaRoutes);
+app.route("/api/informes", reportesRoutes);
+app.route("/api/panel", panelRoutes);
+app.route("/api/buscar", buscadorRoutes);
+app.route("/api/documentos", documentos);
+app.route("/api/documentos-tipos", documentosTipos);
+app.route("/api/alertas", alertasRoutes);
+app.get("/api/salud", (c) => c.json({ ok: true, app: "Inventarios" }));
+app.notFound((c) => {
+  if (c.req.path.startsWith("/api/")) return c.json({ error: "Ruta no encontrada" }, 404);
+  return c.env.ASSETS.fetch(c.req.raw);
+});
+app.onError((err, c) => {
+  if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+  console.error("Error no controlado:", err);
+  return c.json({ error: "Error interno del servidor" }, 500);
+});
+// El resumen de alertas (stock, caducidades, revisiones de EPI, formaciones y
+// máquinas) se manda solo cuando un administrador lo pide desde el panel y, en
+// producción, una vez por semana por el cron de `wrangler.jsonc` (avisos de
+// caducidad con un mes de antelación).
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: unknown, env: Env, ctx: { waitUntil(promesa: Promise<unknown>): void }): Promise<void> {
+    ctx.waitUntil(enviarResumenDiario(env));
+  },
+};
